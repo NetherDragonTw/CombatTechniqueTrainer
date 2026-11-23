@@ -1,0 +1,19 @@
+// CombatTechniqueTrainer: 1.8 PvP technique practice for a Spigot / Paper 1.8.8 test server (see README.md).
+plugins { id 'java' }
+
+group = 'combattechnique'
+version = '0.2.0'
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/' } // spigot-api 1.8.8
+}
+
+dependencies {
+    compileOnly('org.spigotmc:spigot-api:1.8.8-R0.1-SNAPSHOT') { exclude group: 'net.md-5' }
+}
+
+// 1.8.8 servers usually run Java 8.
+tasks.withType(JavaCompile).configureEach { options.release = 8; options.encoding = 'UTF-8' }
+processResources { filesMatching('plugin.yml') { expand(version: project.version) } }
+jar { archiveFileName = "CombatTechniqueTrainer-${project.version}.jar" }

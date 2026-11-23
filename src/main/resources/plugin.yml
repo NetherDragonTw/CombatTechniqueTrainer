@@ -1,0 +1,13 @@
+name: CombatTechniqueTrainer
+version: ${version}
+main: combattechnique.CombatTechniqueTrainerPlugin
+description: Practice dummies for 1.8 PvP techniques (knockback displacement, taking knockback / jump resets) with numbers on every hit.
+commands:
+  ctt:
+    description: Practice dummies and your results.
+    aliases: [combattrainer]
+    usage: /ctt [target [distance] | stick [level] | hitme [interval_ms] [level] | hitme stop | clear | stats | reset]
+    permission: combattechnique.use
+permissions:
+  combattechnique.use:
+    default: op
