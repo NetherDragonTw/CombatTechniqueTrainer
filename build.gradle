@@ -2,7 +2,7 @@
 plugins { id 'java' }
 
 group = 'combattechnique'
-version = '0.4.0'
+version = '0.5.0'
 
 repositories {
     mavenCentral()
@@ -11,6 +11,7 @@ repositories {
 
 dependencies {
     compileOnly('org.spigotmc:spigot-api:1.8.8-R0.1-SNAPSHOT') { exclude group: 'net.md-5' }
+    compileOnly 'io.netty:netty-all:4.0.23.Final' // bundled (unrelocated) in 1.8.8 servers; used for the player dummy
 }
 
 // 1.8.8 servers usually run Java 8.

@@ -5,6 +5,17 @@ server and explained in chat, so you can see *why* a technique worked or not ins
 
 ## Techniques
 
+### All in one: a player dummy — `/ctt npc [interval_ms] [level] [distance]`
+A dummy that looks like a player (some clients and mods only treat players as opponents). Hit it to practise
+displacement: you get the same report as with `/ctt target`, using the last rotation the server received from you
+before your attack packet. It also hits you back with a proper arm swing every `interval_ms` (default 1000; `0` = it
+never hits) with `level` extra knockback (default 1, a sprint hit) while you are within 3 blocks, and every hit you take
+gets the jump-reset report of `/ctt hitme`. It faces you, takes vanilla 1.8 knockback (with the vanilla 0.5 s hurt
+cooldown), and is put back on its spot 1.5 s after each hit. `/ctt npc off` removes it.
+
+It exists only as packets (a player entity the server never adds to its world), so it needs Spigot / Paper 1.8.8 and
+flat ground: it lands at the height it was spawned at. It shows in the tab list as `Sparring`.
+
 ### Knockback displacement — `/ctt target [distance]`
 In 1.8 a melee hit pushes the victim 0.4 straight away from the attacker's **position**, plus 0.5 per extra knockback
 level (sprinting = 1, each Knockback enchantment level = 1) along the attacker's **yaw**, i.e. the last rotation the
@@ -48,6 +59,7 @@ hit you get:
 
 | Command | |
 |---|---|
+| `/ctt npc [interval_ms] [level] [distance]`, `/ctt npc off` | player dummy: displacement target that also hits you (knockback / jump reset) |
 | `/ctt target [distance]` | displacement dummy (1.5–6 blocks, default 3) and a Knockback I stick |
 | `/ctt target move [speed] [width] [distance]` | a dummy walking side to side (0.5–6 blocks/s, 1–10 blocks wide) |
 | `/ctt partner add\|remove <player>`, `/ctt partner list` | measure hits both ways with a friend |
@@ -60,7 +72,7 @@ hit you get:
 
 Alias: `/combattrainer`. Permission: `combattechnique.use` (default: op).
 
-Results are also appended to `plugins/CombatTechniqueTrainer/displace.csv` (with the target kind: dummy, moving, partner) and `knockback.csv` (with the source: dummy, or the partner's name) for your own analysis.
+Results are also appended to `plugins/CombatTechniqueTrainer/displace.csv` (with the target kind: dummy, moving, partner, npc) and `knockback.csv` (with the source: dummy, or the partner's / player dummy's name) for your own analysis.
 
 ## Building
 

@@ -21,6 +21,12 @@ import org.bukkit.event.entity.EntityTargetEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
+import org.bukkit.Sound;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelDuplexHandler;
+import io.netty.channel.ChannelHandlerContext;
 import org.bukkit.event.player.PlayerVelocityEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -63,6 +69,9 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     private final Map<UUID, Mover> movers = new HashMap<UUID, Mover>();            // moving targets
     private final Map<UUID, String> partners = new HashMap<UUID, String>();        // players whose hits taken are measured
     private int moverTask = -1;
+    private final Map<UUID, PlayerNpc> npcs = new HashMap<UUID, PlayerNpc>();                 // owner -> their player NPC
+    private final java.util.concurrent.ConcurrentHashMap<Integer, PlayerNpc> npcById = new java.util.concurrent.ConcurrentHashMap<Integer, PlayerNpc>();
+    private int npcTask = -1;
     private final Map<UUID, Hit> partnerHits = new HashMap<UUID, Hit>();          // player -> knockback from a partner being followed
     private final Map<UUID, Object[]> partnerHitAt = new HashMap<UUID, Object[]>(); // player -> {ms, partner name, level, start, onGround}
     private final Map<UUID, Deque<long[]>> looks = new HashMap<UUID, Deque<long[]>>(); // player -> (ms, yaw * 1000)
@@ -74,12 +83,15 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     public void onEnable() {
         getServer().getPluginManager().registerEvents(this, this);
         getDataFolder().mkdirs();
+        for (Player p : getServer().getOnlinePlayers()) listen(p);
     }
 
     @Override
     public void onDisable() {
         clearTargets();
         for (UUID id : new ArrayList<UUID>(sparring.keySet())) stopSparring(id, false);
+        for (UUID id : new ArrayList<UUID>(npcs.keySet())) removeNpc(id);
+        for (Player p : getServer().getOnlinePlayers()) unlisten(p);
     }
 
     @Override
@@ -104,6 +116,16 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             }
         } else if (sub.equals("partner")) {
             partner(p, args);
+        } else if (sub.equals("npc")) {
+            if (args.length > 1 && (args[1].equalsIgnoreCase("off") || args[1].equalsIgnoreCase("remove"))) {
+                p.sendMessage(ChatColor.GRAY + (removeNpc(p.getUniqueId()) ? "Player dummy removed." : "You have no player dummy."));
+                return true;
+            }
+            long interval = args.length > 1 ? (long) clamp(args[1], 0, 5000, 1000) : 1000;
+            if (interval > 0 && interval < 250) interval = 250;
+            int level = args.length > 2 ? (int) clamp(args[2], 0, 5, 1) : 1;
+            double distance = args.length > 3 ? clamp(args[3], 1.5, 6, 3) : 3;
+            spawnNpc(p, interval, level, distance);
         } else if (sub.equals("stick")) {
             int level = 1;
             if (args.length > 1) try { level = Math.max(1, Math.min(5, Integer.parseInt(args[1]))); } catch (NumberFormatException ignored) {}
@@ -120,6 +142,8 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             clearTargets();
             partners.clear();
             for (UUID id : new ArrayList<UUID>(sparring.keySet())) stopSparring(id, false);
+            n += npcs.size();
+            for (UUID id : new ArrayList<UUID>(npcs.keySet())) removeNpc(id);
             p.sendMessage(ChatColor.GRAY + "Removed " + n + " dummy/dummies.");
         } else if (sub.equals("stats")) {
             int[] s = stats.get(p.getUniqueId());
@@ -139,6 +163,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             p.sendMessage(ChatColor.YELLOW + "/ctt target move [speed] [width] [distance]" + ChatColor.GRAY + " - a target that walks side to side (default 2.5 blocks/s over 4 blocks)");
             p.sendMessage(ChatColor.YELLOW + "/ctt partner add|remove <player>" + ChatColor.GRAY + " / " + ChatColor.YELLOW + "list" + ChatColor.GRAY + " - measure your hits on a friend too");
             p.sendMessage(ChatColor.YELLOW + "/ctt stick [level]" + ChatColor.GRAY + " - a Knockback stick (default Knockback I, given with /ctt target)");
+            p.sendMessage(ChatColor.YELLOW + "/ctt npc [interval_ms] [level] [distance]" + ChatColor.GRAY + " - a player dummy: hit it (displacement) and it hits you back with a swing (knockback); interval 0 = it never hits; /ctt npc off");
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme [interval_ms] [level]" + ChatColor.GRAY + " - a dummy that hits you (default every 1000 ms, extra knockback 1 like a sprint hit)");
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme stop" + ChatColor.GRAY + " - stop it");
             p.sendMessage(ChatColor.YELLOW + "/ctt clear" + ChatColor.GRAY + " - remove all dummies");
@@ -283,6 +308,8 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
 
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
+        removeNpc(e.getPlayer().getUniqueId());
+        unlisten(e.getPlayer());
         looks.remove(e.getPlayer().getUniqueId());
         partners.remove(e.getPlayer().getUniqueId());
         partnerHits.remove(e.getPlayer().getUniqueId());
@@ -331,7 +358,11 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
 
     private void report(Player p, LivingEntity t, Location from, double bearing, double offset, int level, boolean sprinting, int kbLevel, long hitAt, String kind) {
         if (!p.isOnline() || !t.isValid()) return;
-        Location to = t.getLocation();
+        reportDisplace(p, from, t.getLocation(), bearing, offset, level, sprinting, kbLevel, hitAt, kind);
+    }
+
+    void reportDisplace(Player p, Location from, Location to, double bearing, double offset, int level, boolean sprinting, int kbLevel, long hitAt, String kind) {
+        if (!p.isOnline()) return;
         double dx = to.getX() - from.getX(), dz = to.getZ() - from.getZ();
         double moved = Math.hypot(dx, dz);
         Double dev = moved < 0.15 ? null : Knockback.signed(bearing, Knockback.yawOf(dx, dz));
@@ -404,6 +435,209 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     // The sparring dummy itself takes no damage (players hitting it back would only push it off its spot).
     @EventHandler(ignoreCancelled = true)
     public void onHitDummy(EntityDamageByEntityEvent e) { if (isSparring(e.getEntity())) e.setCancelled(true); }
+
+    // ---- Player dummy: a player NPC you hit (displacement) and that hits you with a swing (knockback) ------------------
+
+    private static final double NPC_REACH = 3.0;   // it hits you within this distance (feet to feet)
+    private static final long HURT_COOLDOWN_MS = 500; // vanilla: a second hit within 10 ticks gives no knockback
+    private static final String LISTENER = "ctt_npc";
+    private int tick;
+
+    private void spawnNpc(Player p, long interval, int level, double distance) {
+        removeNpc(p.getUniqueId());
+        Location eye = p.getLocation();
+        Vector dir = eye.getDirection().setY(0);
+        if (dir.lengthSquared() < 1e-6) dir = new Vector(0, 0, 1);
+        dir.normalize().multiply(distance);
+        Location at = eye.clone().add(dir);
+        at.setY(p.getLocation().getY());
+        at.setYaw((float) Knockback.yawOf(-dir.getX(), -dir.getZ()));
+        PlayerNpc n;
+        try {
+            n = new PlayerNpc(p.getUniqueId(), at, npcName(), interval, level);
+        } catch (Throwable t) {
+            p.sendMessage(ChatColor.RED + "Cannot create a player dummy on this server (" + t.getClass().getSimpleName() + ": " + t.getMessage() + "). It needs Spigot / Paper 1.8.8.");
+            getLogger().warning("Player dummy failed: " + t);
+            return;
+        }
+        npcs.put(p.getUniqueId(), n);
+        npcById.put(n.id, n);
+        for (Player v : n.world.getPlayers()) n.show(v);
+        n.nextHit = System.currentTimeMillis() + 2000;
+        startNpcTask();
+        giveStick(p, 1);
+        p.sendMessage(ChatColor.GREEN + "Player dummy " + n.name + " spawned " + fmt1(distance) + " blocks ahead (on flat ground: it lands at this height). "
+                + (interval > 0 ? "It hits you every " + interval + " ms within " + fmt1(NPC_REACH) + " blocks, extra knockback " + level + "." : "It does not hit back.")
+                + " Hit it to practise displacement. /ctt npc off to remove.");
+    }
+
+    private String npcName() {
+        for (int i = 1; ; i++) {
+            String n = i == 1 ? "Sparring" : "Sparring" + i;
+            boolean used = getServer().getPlayerExact(n) != null;
+            for (PlayerNpc x : npcs.values()) if (x.name.equals(n)) used = true;
+            if (!used) return n;
+        }
+    }
+
+    private boolean removeNpc(UUID owner) {
+        PlayerNpc n = npcs.remove(owner);
+        if (n == null) return false;
+        npcById.remove(n.id);
+        for (Player v : n.world.getPlayers()) n.hide(v);
+        return true;
+    }
+
+    private void startNpcTask() {
+        if (npcTask >= 0) return;
+        npcTask = getServer().getScheduler().scheduleSyncRepeatingTask(this, new Runnable() {
+            @Override public void run() {
+                tick++;
+                if (npcs.isEmpty()) { getServer().getScheduler().cancelTask(npcTask); npcTask = -1; return; }
+                for (PlayerNpc n : new ArrayList<PlayerNpc>(npcs.values())) npcTick(n);
+            }
+        }, 1L, 1L);
+    }
+
+    private void npcTick(PlayerNpc n) {
+        n.tick();
+        if (n.returnTick >= 0 && tick >= n.returnTick) { n.returnTick = -1; n.home(); }
+        Player o = getServer().getPlayer(n.owner);
+        if (o != null && o.getWorld() == n.world && !n.moving) {
+            Location ol = o.getLocation();
+            n.yaw = (float) Knockback.yawOf(ol.getX() - n.x, ol.getZ() - n.z);
+        }
+        n.sync(false);
+        if (o == null || o.getWorld() != n.world || n.intervalMs <= 0 || n.moving || n.returnTick >= 0) return;
+        long now = System.currentTimeMillis();
+        if (now < n.nextHit || o.isDead() || o.getGameMode() == GameMode.CREATIVE || o.getGameMode() == GameMode.SPECTATOR) return;
+        Hit last = partnerHits.get(o.getUniqueId());
+        if (last != null && !last.done) return; // still following its last hit
+        Location ol = o.getLocation();
+        double dx = ol.getX() - n.x, dz = ol.getZ() - n.z;
+        if (Math.hypot(dx, dz) > NPC_REACH || Math.abs(ol.getY() - n.y) > 2) return;
+        n.nextHit = now + n.intervalMs;
+        n.swingArm(); // the swing comes before the hit, as with a 1.8 client
+        Vector old = o.getVelocity();
+        double[] v = Knockback.hitVelocity(new double[]{old.getX(), old.getY(), old.getZ()}, dx, dz, n.yaw, n.level);
+        @SuppressWarnings("deprecation") boolean onGround = o.isOnGround();
+        o.setNoDamageTicks(0);
+        o.damage(0.01); // hurt animation and sound; no source, so the server adds no knockback of its own
+        o.setHealth(o.getMaxHealth());
+        o.setVelocity(new Vector(v[0], v[1], v[2]));
+        final Hit h = new Hit(o, now, n.level, v, ol.clone(), onGround, ping(o), n.name);
+        partnerHits.put(o.getUniqueId(), h);
+        final UUID id = o.getUniqueId();
+        getServer().getScheduler().runTaskLater(this, new Runnable() {
+            @Override public void run() { if (partnerHits.get(id) == h) h.finish(); }
+        }, MEASURE_MS / 50);
+    }
+
+    /** A player attacked the dummy (from the Netty thread, moved to the main thread). */
+    private void npcHit(Player p, PlayerNpc n, float yaw, boolean sprinting, long at) {
+        if (!p.isOnline() || p.getWorld() != n.world || !npcs.containsValue(n)) return;
+        Location pl = p.getLocation();
+        if (Math.hypot(pl.getX() - n.x, pl.getZ() - n.z) > 6 || at - n.lastHurt < HURT_COOLDOWN_MS) return;
+        n.lastHurt = at;
+        ItemStack held = p.getItemInHand();
+        int kbLevel = held == null ? 0 : held.getEnchantmentLevel(Enchantment.KNOCKBACK);
+        int level = kbLevel + (sprinting ? 1 : 0);
+        final Location from = n.location();
+        double bearing = Knockback.yawOf(n.x - pl.getX(), n.z - pl.getZ());
+        double offset = Knockback.signed(bearing, yaw);
+        n.knock(pl.getX(), pl.getZ(), yaw, level);
+        n.hurtFlash();
+        n.world.playSound(from, Sound.HURT_FLESH, 1f, 1f);
+        n.returnTick = tick + RETURN_TICKS;
+        final Player fp = p;
+        final PlayerNpc fn = n;
+        final double fb = bearing, fo = offset;
+        final int fl = level, fk = kbLevel;
+        final boolean fs = sprinting;
+        final long fat = at;
+        getServer().getScheduler().runTaskLater(this, new Runnable() {
+            @Override public void run() { reportDisplace(fp, from, fn.location(), fb, fo, fl, fs, fk, fat, "npc"); }
+        }, MEASURE_TICKS);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onJoin(PlayerJoinEvent e) {
+        final Player p = e.getPlayer();
+        listen(p);
+        getServer().getScheduler().runTaskLater(this, new Runnable() {
+            @Override public void run() { for (PlayerNpc n : npcs.values()) if (p.isOnline() && n.world == p.getWorld()) n.show(p); }
+        }, 10L);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onWorld(PlayerChangedWorldEvent e) {
+        final Player p = e.getPlayer();
+        getServer().getScheduler().runTaskLater(this, new Runnable() {
+            @Override public void run() { for (PlayerNpc n : npcs.values()) if (p.isOnline() && n.world == p.getWorld()) n.show(p); }
+        }, 10L);
+    }
+
+    /**
+     * Reads each player's own packets as they arrive: the last look they sent (the yaw the server would use for a hit),
+     * their sprint state, and attacks on a player dummy (the server ignores those: the dummy is not in its world).
+     */
+    private final class NpcListener extends ChannelDuplexHandler {
+        final Player p;
+        volatile float yaw;
+        volatile boolean sprinting;
+
+        NpcListener(Player p) { this.p = p; this.yaw = p.getLocation().getYaw(); this.sprinting = p.isSprinting(); }
+
+        @Override
+        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+            try { read(msg); } catch (Throwable ignored) {}
+            super.channelRead(ctx, msg);
+        }
+
+        private void read(Object m) {
+            String c = m.getClass().getSimpleName();
+            if (c.equals("PacketPlayInLook") || c.equals("PacketPlayInPositionLook")) {
+                Object y = Nms.nth(m, float.class, 0);
+                if (y != null) yaw = (Float) y;
+            } else if (c.equals("PacketPlayInEntityAction")) {
+                String a = Nms.enumName(m);
+                if ("START_SPRINTING".equals(a)) sprinting = true;
+                else if ("STOP_SPRINTING".equals(a)) sprinting = false;
+            } else if (c.equals("PacketPlayInUseEntity") && !npcById.isEmpty()) {
+                Object id = Nms.nth(m, int.class, 0);
+                final PlayerNpc n = id == null ? null : npcById.get((Integer) id);
+                if (n == null || !"ATTACK".equals(Nms.enumName(m))) return;
+                final float y = yaw;
+                final boolean s = sprinting;
+                final long at = System.currentTimeMillis();
+                // A sprint-hit ends the attacker's sprint (the client does the same on its side).
+                sprinting = false;
+                getServer().getScheduler().runTask(CombatTechniqueTrainerPlugin.this, new Runnable() {
+                    @Override public void run() { npcHit(p, n, y, s, at); }
+                });
+            }
+        }
+    }
+
+    private void listen(Player p) {
+        final Channel ch = Nms.channel(p);
+        if (ch == null) return;
+        final NpcListener l = new NpcListener(p);
+        ch.eventLoop().execute(new Runnable() {
+            @Override public void run() {
+                if (ch.pipeline().get(LISTENER) != null) ch.pipeline().remove(LISTENER);
+                if (ch.pipeline().get("packet_handler") != null) ch.pipeline().addBefore("packet_handler", LISTENER, l);
+            }
+        });
+    }
+
+    private void unlisten(Player p) {
+        final Channel ch = Nms.channel(p);
+        if (ch == null) return;
+        ch.eventLoop().execute(new Runnable() {
+            @Override public void run() { if (ch.pipeline().get(LISTENER) != null) ch.pipeline().remove(LISTENER); }
+        });
+    }
 
     // ---- Partners hitting you: the real knockback the server gave, followed like the dummy's -----------------------
 
