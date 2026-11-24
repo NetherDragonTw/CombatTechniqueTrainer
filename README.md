@@ -23,8 +23,12 @@ The dummy returns to its spot 1.5 s after each hit.
 sight (default 2.5 blocks/s over 4 blocks; a strafing player moves about 4.3 blocks/s, a sprinting one about 5.6),
 so you can no longer flick to a fixed spot. It stops while knocked back and carries on after it is put back.
 
-**Practice partner** — `/ctt partner add <player>`: your hits on a friend are measured like hits on a dummy. Their
-own movement adds to where they fly, so expect more spread. `/ctt partner remove <player>`, `/ctt partner list`.
+**Practice partner** — `/ctt partner add <player>`: your hits on a friend are measured like hits on a dummy (their
+own movement adds to where they fly, so expect more spread), and so is the knockback you take from them: every hit
+they land on you gets the same jump-reset / push report as `/ctt hitme`, with the real vanilla knockback the server
+gave. Partners are healed after each of your hits so practice does not kill them. `/ctt partner remove <player>`,
+`/ctt partner list`. Unlike the villager dummies, a partner is a real player: their swing is real and clients treat
+them like any other player.
 
 Tips: displacement only turns the *extra* knockback, so sprint
 and/or use the stick. With one extra level a 90° turn gives about 51° of sideways deflection; more levels give more.
@@ -46,7 +50,7 @@ hit you get:
 |---|---|
 | `/ctt target [distance]` | displacement dummy (1.5–6 blocks, default 3) and a Knockback I stick |
 | `/ctt target move [speed] [width] [distance]` | a dummy walking side to side (0.5–6 blocks/s, 1–10 blocks wide) |
-| `/ctt partner add\|remove <player>`, `/ctt partner list` | measure your hits on a friend too |
+| `/ctt partner add\|remove <player>`, `/ctt partner list` | measure hits both ways with a friend |
 | `/ctt stick [level]` | a Knockback stick (1–5, default 1) |
 | `/ctt hitme [interval_ms] [level]` | sparring dummy that hits you (250–5000 ms, level 0–5) |
 | `/ctt hitme stop` | remove your sparring dummy |
@@ -56,7 +60,7 @@ hit you get:
 
 Alias: `/combattrainer`. Permission: `combattechnique.use` (default: op).
 
-Results are also appended to `plugins/CombatTechniqueTrainer/displace.csv` (with the target kind: dummy, moving, partner) and `knockback.csv` for your own analysis.
+Results are also appended to `plugins/CombatTechniqueTrainer/displace.csv` (with the target kind: dummy, moving, partner) and `knockback.csv` (with the source: dummy, or the partner's name) for your own analysis.
 
 ## Building
 

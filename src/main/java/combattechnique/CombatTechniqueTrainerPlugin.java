@@ -21,6 +21,7 @@ import org.bukkit.event.entity.EntityTargetEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerVelocityEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -62,6 +63,8 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     private final Map<UUID, Mover> movers = new HashMap<UUID, Mover>();            // moving targets
     private final Map<UUID, String> partners = new HashMap<UUID, String>();        // players whose hits taken are measured
     private int moverTask = -1;
+    private final Map<UUID, Hit> partnerHits = new HashMap<UUID, Hit>();          // player -> knockback from a partner being followed
+    private final Map<UUID, Object[]> partnerHitAt = new HashMap<UUID, Object[]>(); // player -> {ms, partner name, level, start, onGround}
     private final Map<UUID, Deque<long[]>> looks = new HashMap<UUID, Deque<long[]>>(); // player -> (ms, yaw * 1000)
     private final Map<UUID, int[]> stats = new HashMap<UUID, int[]>();             // player -> {hits with extra kb, displaced}
     private final Map<UUID, Sparring> sparring = new HashMap<UUID, Sparring>();    // player -> the dummy hitting them
@@ -258,8 +261,9 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         if (q == null) { p.sendMessage(ChatColor.RED + args[2] + " is not online."); return; }
         if (q.equals(p)) { p.sendMessage(ChatColor.RED + "Hit someone else."); return; }
         partners.put(q.getUniqueId(), q.getName());
-        p.sendMessage(ChatColor.GREEN + "Your hits on " + q.getName() + " are measured now. Their own movement adds to where they fly, so expect more spread than on a dummy.");
-        q.sendMessage(ChatColor.GRAY + p.getName() + " added you as a practice partner: hits you take are measured.");
+        p.sendMessage(ChatColor.GREEN + "Practice partner " + q.getName() + ": your hits on them are measured (their own movement adds to where they fly), "
+                + "and so is the knockback you take from them (jump resets). They are healed after each of your hits.");
+        q.sendMessage(ChatColor.GRAY + p.getName() + " added you as a practice partner: hits between you are measured.");
     }
 
     // The player's look history (server side: the rotations the client sent).
@@ -273,12 +277,16 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         while (!q.isEmpty() && now - q.peekFirst()[0] > LOOK_KEEP_MS) q.removeFirst();
         Sparring s = sparring.get(e.getPlayer().getUniqueId());
         if (s != null && s.pending != null) s.pending.move(e.getFrom(), e.getTo(), now);
+        Hit ph = partnerHits.get(e.getPlayer().getUniqueId());
+        if (ph != null) ph.move(e.getFrom(), e.getTo(), now);
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         looks.remove(e.getPlayer().getUniqueId());
         partners.remove(e.getPlayer().getUniqueId());
+        partnerHits.remove(e.getPlayer().getUniqueId());
+        partnerHitAt.remove(e.getPlayer().getUniqueId());
         stopSparring(e.getPlayer().getUniqueId(), false);
     }
 
@@ -304,7 +312,12 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         getServer().getScheduler().runTaskLater(this, new Runnable() {
             @Override public void run() { report(p, t, from, bearing, offset, level, sprinting, kbLevel, hitAt, kind); if (dummy && t.isValid()) t.setHealth(t.getMaxHealth()); }
         }, MEASURE_TICKS);
-        if (!dummy) return; // a partner is a real player: nothing to put back
+        if (!dummy) { // a partner is a real player: nothing to put back, but practice should not kill them
+            getServer().getScheduler().runTaskLater(this, new Runnable() {
+                @Override public void run() { if (t.isValid() && !t.isDead()) t.setHealth(t.getMaxHealth()); }
+            }, 1L);
+            return;
+        }
         getServer().getScheduler().runTaskLater(this, new Runnable() {
             @Override public void run() {
                 if (!t.isValid()) return;
@@ -392,6 +405,47 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     @EventHandler(ignoreCancelled = true)
     public void onHitDummy(EntityDamageByEntityEvent e) { if (isSparring(e.getEntity())) e.setCancelled(true); }
 
+    // ---- Partners hitting you: the real knockback the server gave, followed like the dummy's -----------------------
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPartnerHit(EntityDamageByEntityEvent e) {
+        if (!(e.getDamager() instanceof Player) || !(e.getEntity() instanceof Player)) return;
+        Player a = (Player) e.getDamager(), v = (Player) e.getEntity();
+        if (!partners.containsKey(a.getUniqueId()) || partners.containsKey(v.getUniqueId())) return;
+        Hit old = partnerHits.get(v.getUniqueId());
+        if (old != null) old.finish(); // a new hit ends the last one
+        ItemStack held = a.getItemInHand();
+        int level = (held == null ? 0 : held.getEnchantmentLevel(Enchantment.KNOCKBACK)) + (a.isSprinting() ? 1 : 0);
+        @SuppressWarnings("deprecation") boolean onGround = v.isOnGround();
+        partnerHitAt.put(v.getUniqueId(), new Object[]{System.currentTimeMillis(), a.getName(), level, v.getLocation().clone(), onGround});
+        final UUID id = v.getUniqueId();
+        // The knockback goes out with the server's entity tracker later in this tick (PlayerVelocityEvent); if no
+        // event came, use the velocity the server set.
+        getServer().getScheduler().runTaskLater(this, new Runnable() {
+            @Override public void run() {
+                Player q = getServer().getPlayer(id);
+                if (q != null && partnerHitAt.containsKey(id)) startPartnerHit(q, q.getVelocity());
+            }
+        }, 1L);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onVelocity(PlayerVelocityEvent e) {
+        if (partnerHitAt.containsKey(e.getPlayer().getUniqueId())) startPartnerHit(e.getPlayer(), e.getVelocity());
+    }
+
+    private void startPartnerHit(Player v, Vector vel) {
+        Object[] h = partnerHitAt.remove(v.getUniqueId());
+        if (h == null || System.currentTimeMillis() - (Long) h[0] > 200) return;
+        Hit hit = new Hit(v, (Long) h[0], (Integer) h[2], new double[]{vel.getX(), vel.getY(), vel.getZ()}, (Location) h[3], (Boolean) h[4], ping(v), (String) h[1]);
+        partnerHits.put(v.getUniqueId(), hit);
+        final UUID id = v.getUniqueId();
+        final Hit fh = hit;
+        getServer().getScheduler().runTaskLater(this, new Runnable() {
+            @Override public void run() { if (partnerHits.get(id) == fh) fh.finish(); }
+        }, MEASURE_MS / 50);
+    }
+
     // ---- Taking knockback: a sparring dummy that hits you ----------------------------------------------------------
 
     private static final double SPAR_REACH = 4.0;      // the dummy only hits within this distance (eyes ignored)
@@ -423,12 +477,13 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         final Location start;
         final boolean onGround;
         final int ping;
+        final String source;           // "dummy", or the partner who hit
         final List<double[]> moves = new ArrayList<double[]>(); // {ms after the hit, dy, x, z}
         boolean done;
 
-        Hit(Player p, long at, int level, double[] v, Location start, boolean onGround, int ping) {
+        Hit(Player p, long at, int level, double[] v, Location start, boolean onGround, int ping, String source) {
             this.p = p; this.at = at; this.level = level; this.kbX = v[0]; this.kbY = v[1]; this.kbZ = v[2];
-            this.start = start; this.onGround = onGround; this.ping = ping;
+            this.start = start; this.onGround = onGround; this.ping = ping; this.source = source;
         }
 
         void move(Location from, Location to, long now) {
@@ -449,6 +504,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             done = true;
             Sparring s = sparring.get(p.getUniqueId());
             if (s != null && s.pending == this) s.pending = null;
+            if (partnerHits.get(p.getUniqueId()) == this) partnerHits.remove(p.getUniqueId());
             if (p.isOnline()) reportKnockback(this);
         }
     }
@@ -520,7 +576,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         p.damage(0.01); // the hurt animation and sound; no source, so no second knockback from the server
         p.setHealth(p.getMaxHealth());
         p.setVelocity(new Vector(v[0], v[1], v[2]));
-        s.pending = new Hit(p, System.currentTimeMillis(), s.level, v, pl.clone(), onGround, ping(p));
+        s.pending = new Hit(p, System.currentTimeMillis(), s.level, v, pl.clone(), onGround, ping(p), "dummy");
     }
 
     private void reportKnockback(Hit h) {
@@ -557,7 +613,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         k[0]++; k[2] += push;
         if (reset) { k[1]++; k[4] += push; } else k[3] += push;
 
-        h.p.sendMessage(jump);
+        h.p.sendMessage((h.source.equals("dummy") ? "" : ChatColor.DARK_GRAY + "[" + h.source + "] ") + jump);
         h.p.sendMessage("  " + ChatColor.WHITE + "pushed " + fmt2(push) + " blocks" + ChatColor.GRAY + " (" + fmt2(side) + " sideways) over "
                 + Math.min(h.moves.size(), (rise < 0 ? 0 : rise) + PUSH_MOVES) + " moves"
                 + ChatColor.DARK_GRAY + " | " + ChatColor.GRAY + "knockback seen " + (riseMs == null ? "?" : riseMs + " ms") + " after the hit, ping " + h.ping + " ms");
@@ -569,12 +625,12 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         boolean header = !f.exists();
         int rise = h.riseIndex();
         try (FileWriter w = new FileWriter(f, true)) {
-            if (header) w.write("time,player,level,pingMs,onGroundAtHit,kbY,firstRiseMs,firstRiseDy,nextDy,result,pushBlocks,sideBlocks\n");
+            if (header) w.write("time,player,level,pingMs,onGroundAtHit,kbY,firstRiseMs,firstRiseDy,nextDy,result,pushBlocks,sideBlocks,source\n");
             String result = ChatColor.stripColor(jump).split(" \\(")[0].toLowerCase(java.util.Locale.ROOT);
             w.write(h.at + "," + h.p.getName() + "," + h.level + "," + h.ping + "," + h.onGround + "," + fmt3(h.kbY) + ","
                     + (riseMs == null ? "" : riseMs) + "," + (rise < 0 ? "" : fmt3(h.moves.get(rise)[1])) + ","
                     + (rise < 0 || rise + 1 >= h.moves.size() ? "" : fmt3(h.moves.get(rise + 1)[1])) + "," + result + ","
-                    + fmt2(push) + "," + fmt2(side) + "\n");
+                    + fmt2(push) + "," + fmt2(side) + "," + h.source + "\n");
         } catch (IOException ignored) {
         }
     }
