@@ -59,6 +59,9 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     private static final long LOOK_KEEP_MS = 1000;
 
     private final Map<UUID, Location> targets = new HashMap<UUID, Location>();      // target -> its spot
+    private final Map<UUID, Mover> movers = new HashMap<UUID, Mover>();            // moving targets
+    private final Map<UUID, String> partners = new HashMap<UUID, String>();        // players whose hits taken are measured
+    private int moverTask = -1;
     private final Map<UUID, Deque<long[]>> looks = new HashMap<UUID, Deque<long[]>>(); // player -> (ms, yaw * 1000)
     private final Map<UUID, int[]> stats = new HashMap<UUID, int[]>();             // player -> {hits with extra kb, displaced}
     private final Map<UUID, Sparring> sparring = new HashMap<UUID, Sparring>();    // player -> the dummy hitting them
@@ -82,9 +85,22 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         Player p = (Player) sender;
         String sub = args.length > 0 ? args[0].toLowerCase() : "help";
         if (sub.equals("target") || sub.equals("spawn")) {
-            double distance = 3.0;
-            if (args.length > 1) try { distance = Math.max(1.5, Math.min(6, Double.parseDouble(args[1]))); } catch (NumberFormatException ignored) {}
-            spawn(p, distance);
+            boolean move = args.length > 1 && args[1].equalsIgnoreCase("move");
+            int i = move ? 2 : 1;
+            double speed = 2.5, width = 4, distance = 3.0;
+            if (move && args.length > i) { speed = clamp(args[i], 0.5, 6, speed); i++; }
+            if (move && args.length > i) { width = clamp(args[i], 1, 10, width); i++; }
+            if (args.length > i) distance = clamp(args[i], 1.5, 6, distance);
+            Villager v = spawn(p, distance, move);
+            if (move) {
+                Location home = targets.get(v.getUniqueId());
+                Vector side = new Vector(-Math.cos(Math.toRadians(home.getYaw())), 0, -Math.sin(Math.toRadians(home.getYaw())));
+                movers.put(v.getUniqueId(), new Mover(v, home, side, width / 2, speed));
+                startMovers();
+                p.sendMessage(ChatColor.GRAY + "It walks side to side over " + fmt1(width) + " blocks at " + fmt1(speed) + " blocks/s (a sprinting player moves about 5.6, a strafing one about 4.3).");
+            }
+        } else if (sub.equals("partner")) {
+            partner(p, args);
         } else if (sub.equals("stick")) {
             int level = 1;
             if (args.length > 1) try { level = Math.max(1, Math.min(5, Integer.parseInt(args[1]))); } catch (NumberFormatException ignored) {}
@@ -99,6 +115,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         } else if (sub.equals("clear")) {
             int n = targets.size() + sparring.size();
             clearTargets();
+            partners.clear();
             for (UUID id : new ArrayList<UUID>(sparring.keySet())) stopSparring(id, false);
             p.sendMessage(ChatColor.GRAY + "Removed " + n + " dummy/dummies.");
         } else if (sub.equals("stats")) {
@@ -115,7 +132,9 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             kbStats.remove(p.getUniqueId());
             p.sendMessage(ChatColor.GRAY + "Your results were reset.");
         } else {
-            p.sendMessage(ChatColor.YELLOW + "/ctt spawn [distance]" + ChatColor.GRAY + " - a target in front of you (default 3 blocks)");
+            p.sendMessage(ChatColor.YELLOW + "/ctt target [distance]" + ChatColor.GRAY + " - a target in front of you (default 3 blocks)");
+            p.sendMessage(ChatColor.YELLOW + "/ctt target move [speed] [width] [distance]" + ChatColor.GRAY + " - a target that walks side to side (default 2.5 blocks/s over 4 blocks)");
+            p.sendMessage(ChatColor.YELLOW + "/ctt partner add|remove <player>" + ChatColor.GRAY + " / " + ChatColor.YELLOW + "list" + ChatColor.GRAY + " - measure your hits on a friend too");
             p.sendMessage(ChatColor.YELLOW + "/ctt stick [level]" + ChatColor.GRAY + " - a Knockback stick (default Knockback I, given with /ctt target)");
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme [interval_ms] [level]" + ChatColor.GRAY + " - a dummy that hits you (default every 1000 ms, extra knockback 1 like a sprint hit)");
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme stop" + ChatColor.GRAY + " - stop it");
@@ -126,7 +145,11 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         return true;
     }
 
-    private void spawn(Player p, double distance) {
+    private static double clamp(String v, double min, double max, double dflt) {
+        try { return Math.max(min, Math.min(max, Double.parseDouble(v))); } catch (NumberFormatException e) { return dflt; }
+    }
+
+    private Villager spawn(Player p, double distance, boolean moving) {
         Location eye = p.getLocation();
         Vector dir = eye.getDirection().setY(0);
         if (dir.lengthSquared() < 1e-6) dir = new Vector(0, 0, 1);
@@ -136,7 +159,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         at.setYaw((float) Knockback.yawOf(-dir.getX(), -dir.getZ())); // facing the player
         at.setPitch(0);
         Villager v = (Villager) p.getWorld().spawnEntity(at, EntityType.VILLAGER);
-        v.setCustomName(ChatColor.GOLD + "Displace target");
+        v.setCustomName(ChatColor.GOLD + (moving ? "Moving target" : "Displace target"));
         v.setCustomNameVisible(true);
         v.setRemoveWhenFarAway(false);
         v.addPotionEffect(new PotionEffect(PotionEffectType.SLOW, Integer.MAX_VALUE, 255, false, false), true);
@@ -145,6 +168,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         targets.put(v.getUniqueId(), at.clone());
         giveStick(p, 1);
         p.sendMessage(ChatColor.GREEN + "Target spawned " + distance + " blocks ahead. Sprint-hit it while turning your look away for the hit.");
+        return v;
     }
 
     /** A Knockback stick like Bed Wars' (Knockback I), unless the player already carries one of the same level. */
@@ -166,9 +190,77 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             for (org.bukkit.World w : getServer().getWorlds()) for (Entity e : w.getEntities()) if (e.getUniqueId().equals(id)) e.remove();
         }
         targets.clear();
+        movers.clear();
+        if (moverTask >= 0) { getServer().getScheduler().cancelTask(moverTask); moverTask = -1; }
     }
 
-    private boolean isTarget(Entity e) { return e != null && targets.containsKey(e.getUniqueId()); }
+    private boolean isTarget(Entity e) { return e != null && (targets.containsKey(e.getUniqueId()) || partners.containsKey(e.getUniqueId())); }
+
+    private boolean isDummyTarget(Entity e) { return e != null && targets.containsKey(e.getUniqueId()); }
+
+    // ---- Moving targets: walk side to side across the line of the hit, paused while knocked back ----------------
+
+    private static final class Mover {
+        final Villager v;
+        final Location home;      // middle of the path, facing the player who spawned it
+        final Vector side;        // unit vector across
+        final double half, speed; // half the path length, blocks per second
+        double along;             // distance walked so far
+        boolean paused;
+
+        Mover(Villager v, Location home, Vector side, double half, double speed) {
+            this.v = v; this.home = home; this.side = side; this.half = half; this.speed = speed;
+        }
+
+        /** Where it stands now: a triangle wave between -half and +half. */
+        Location at() {
+            double period = 4 * half, s = along % period;
+            double off = s < 2 * half ? -half + s : 3 * half - s;
+            Location l = home.clone().add(side.clone().multiply(off));
+            l.setYaw(home.getYaw());
+            l.setPitch(0);
+            return l;
+        }
+    }
+
+    private void startMovers() {
+        if (moverTask >= 0) return;
+        moverTask = getServer().getScheduler().scheduleSyncRepeatingTask(this, new Runnable() {
+            @Override public void run() {
+                for (Iterator<Mover> it = movers.values().iterator(); it.hasNext(); ) {
+                    Mover m = it.next();
+                    if (!m.v.isValid()) { it.remove(); continue; }
+                    if (m.paused) continue;
+                    m.along += m.speed / 20.0;
+                    m.v.teleport(m.at());
+                }
+            }
+        }, 1L, 1L);
+    }
+
+    // ---- Partners: a friend whose hits taken are measured like a target's ------------------------------------------
+
+    private void partner(Player p, String[] args) {
+        String op = args.length > 1 ? args[1].toLowerCase() : "list";
+        if (op.equals("list")) {
+            p.sendMessage(ChatColor.GRAY + "Partners: " + (partners.isEmpty() ? "none" : String.join(", ", partners.values())));
+            return;
+        }
+        if (args.length < 3) { p.sendMessage(ChatColor.RED + "/ctt partner add|remove <player>"); return; }
+        if (op.equals("remove")) {
+            Player q = getServer().getPlayerExact(args[2]);
+            boolean removed = q != null ? partners.remove(q.getUniqueId()) != null : partners.values().removeIf(n -> n.equalsIgnoreCase(args[2]));
+            p.sendMessage(ChatColor.GRAY + (removed ? "Removed " + args[2] + "." : args[2] + " is not a partner."));
+            return;
+        }
+        if (!op.equals("add")) { p.sendMessage(ChatColor.RED + "/ctt partner add|remove <player>"); return; }
+        Player q = getServer().getPlayerExact(args[2]);
+        if (q == null) { p.sendMessage(ChatColor.RED + args[2] + " is not online."); return; }
+        if (q.equals(p)) { p.sendMessage(ChatColor.RED + "Hit someone else."); return; }
+        partners.put(q.getUniqueId(), q.getName());
+        p.sendMessage(ChatColor.GREEN + "Your hits on " + q.getName() + " are measured now. Their own movement adds to where they fly, so expect more spread than on a dummy.");
+        q.sendMessage(ChatColor.GRAY + p.getName() + " added you as a practice partner: hits you take are measured.");
+    }
 
     // The player's look history (server side: the rotations the client sent).
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -184,12 +276,17 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     }
 
     @EventHandler
-    public void onQuit(PlayerQuitEvent e) { looks.remove(e.getPlayer().getUniqueId()); stopSparring(e.getPlayer().getUniqueId(), false); }
+    public void onQuit(PlayerQuitEvent e) {
+        looks.remove(e.getPlayer().getUniqueId());
+        partners.remove(e.getPlayer().getUniqueId());
+        stopSparring(e.getPlayer().getUniqueId(), false);
+    }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onHit(EntityDamageByEntityEvent e) {
         if (!isTarget(e.getEntity()) || !(e.getDamager() instanceof Player)) return;
         final Player p = (Player) e.getDamager();
+        if (!(e.getEntity() instanceof LivingEntity)) return;
         final LivingEntity t = (LivingEntity) e.getEntity();
         final Location from = t.getLocation().clone();
         final Location pl = p.getLocation().clone();
@@ -200,20 +297,26 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         final int kbLevel = held == null ? 0 : held.getEnchantmentLevel(Enchantment.KNOCKBACK);
         final boolean sprinting = p.isSprinting();
         final int level = kbLevel + (sprinting ? 1 : 0);
+        final boolean dummy = isDummyTarget(t);
+        final Mover mover = movers.get(t.getUniqueId());
+        final String kind = mover != null ? "moving" : dummy ? "dummy" : "partner";
+        if (mover != null) mover.paused = true;
         getServer().getScheduler().runTaskLater(this, new Runnable() {
-            @Override public void run() { report(p, t, from, bearing, offset, level, sprinting, kbLevel, hitAt); if (t.isValid()) t.setHealth(t.getMaxHealth()); }
+            @Override public void run() { report(p, t, from, bearing, offset, level, sprinting, kbLevel, hitAt, kind); if (dummy && t.isValid()) t.setHealth(t.getMaxHealth()); }
         }, MEASURE_TICKS);
+        if (!dummy) return; // a partner is a real player: nothing to put back
         getServer().getScheduler().runTaskLater(this, new Runnable() {
             @Override public void run() {
                 if (!t.isValid()) return;
-                Location home = targets.get(t.getUniqueId());
+                Location home = mover != null ? mover.at() : targets.get(t.getUniqueId());
                 if (home != null) { t.teleport(home); t.setVelocity(new Vector(0, 0, 0)); }
                 t.setHealth(t.getMaxHealth());
+                if (mover != null) mover.paused = false;
             }
         }, RETURN_TICKS);
     }
 
-    private void report(Player p, LivingEntity t, Location from, double bearing, double offset, int level, boolean sprinting, int kbLevel, long hitAt) {
+    private void report(Player p, LivingEntity t, Location from, double bearing, double offset, int level, boolean sprinting, int kbLevel, long hitAt, String kind) {
         if (!p.isOnline() || !t.isValid()) return;
         Location to = t.getLocation();
         double dx = to.getX() - from.getX(), dz = to.getZ() - from.getZ();
@@ -236,7 +339,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
                 + ChatColor.WHITE + "yaw off " + fmt(offset) + " deg, flew " + (dev == null ? "?" : fmt(dev)) + " deg off straight"
                 + ChatColor.GRAY + " (physics: " + fmt(expected) + ")");
         p.sendMessage("  " + extra + ChatColor.DARK_GRAY + " | " + look);
-        log(p, offset, level, dev, expected, away, moved);
+        log(p, offset, level, dev, expected, away, moved, kind);
     }
 
     /** {max degrees away from the bearing, ms the look stayed >= AWAY_DEG away} around the hit, or null. */
@@ -260,12 +363,14 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
 
     private static String fmt(double v) { return String.format(java.util.Locale.ROOT, "%.0f", v); }
 
-    private void log(Player p, double offset, int level, Double dev, double expected, long[] away, double moved) {
+    private static String fmt1(double v) { return String.format(java.util.Locale.ROOT, "%.1f", v); }
+
+    private void log(Player p, double offset, int level, Double dev, double expected, long[] away, double moved, String kind) {
         File f = new File(getDataFolder(), "displace.csv");
         boolean header = !f.exists();
         try (FileWriter w = new FileWriter(f, true)) {
-            if (header) w.write("time,player,yawOffsetDeg,extraLevel,flewOffDeg,expectedDeg,awayMs,awayMaxDeg,movedBlocks\n");
-            w.write(System.currentTimeMillis() + "," + p.getName() + "," + fmt(offset) + "," + level + "," + (dev == null ? "" : fmt(dev)) + ","
+            if (header) w.write("time,player,target,yawOffsetDeg,extraLevel,flewOffDeg,expectedDeg,awayMs,awayMaxDeg,movedBlocks\n");
+            w.write(System.currentTimeMillis() + "," + p.getName() + "," + kind + "," + fmt(offset) + "," + level + "," + (dev == null ? "" : fmt(dev)) + ","
                     + fmt(expected) + "," + (away == null ? "" : away[1]) + "," + (away == null ? "" : away[0]) + "," + String.format(java.util.Locale.ROOT, "%.2f", moved) + "\n");
         } catch (IOException ignored) {
         }
@@ -273,15 +378,15 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
 
     // Targets: no trading, no other damage, no wandering.
     @EventHandler(ignoreCancelled = true)
-    public void onInteract(PlayerInteractEntityEvent e) { if (isTarget(e.getRightClicked()) || isSparring(e.getRightClicked())) e.setCancelled(true); }
+    public void onInteract(PlayerInteractEntityEvent e) { if (isDummyTarget(e.getRightClicked()) || isSparring(e.getRightClicked())) e.setCancelled(true); }
 
     @EventHandler(ignoreCancelled = true)
     public void onDamage(EntityDamageEvent e) {
-        if ((isTarget(e.getEntity()) || isSparring(e.getEntity())) && !(e instanceof EntityDamageByEntityEvent)) e.setCancelled(true);
+        if ((isDummyTarget(e.getEntity()) || isSparring(e.getEntity())) && !(e instanceof EntityDamageByEntityEvent)) e.setCancelled(true);
     }
 
     @EventHandler(ignoreCancelled = true)
-    public void onTarget(EntityTargetEvent e) { if (isTarget(e.getEntity()) || isSparring(e.getEntity())) e.setCancelled(true); }
+    public void onTarget(EntityTargetEvent e) { if (isDummyTarget(e.getEntity()) || isSparring(e.getEntity())) e.setCancelled(true); }
 
     // The sparring dummy itself takes no damage (players hitting it back would only push it off its spot).
     @EventHandler(ignoreCancelled = true)
