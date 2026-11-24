@@ -55,6 +55,12 @@ hit you get:
 
 `/ctt hitme stop` removes it. You take no real damage. Survival or adventure mode only (creative takes no knockback).
 
+### Practice sessions — `/ctt session on`
+Turns on a sidebar with your practice time, displacement hits / displaced / success rate, and knockback taken / jump
+resets / rate / average push. It keeps counting across logins and server restarts until you run `/ctt session reset`
+(`/ctt session off` pauses it and hides the sidebar; `/ctt session` prints it in chat). Time only counts while the
+session is on and you are online. Stored in `plugins/CombatTechniqueTrainer/sessions.yml`.
+
 ## Commands
 
 | Command | |
@@ -66,6 +72,7 @@ hit you get:
 | `/ctt stick [level]` | a Knockback stick (1–5, default 1) |
 | `/ctt hitme [interval_ms] [level]` | sparring dummy that hits you (250–5000 ms, level 0–5) |
 | `/ctt hitme stop` | remove your sparring dummy |
+| `/ctt session on\|off\|reset`, `/ctt session` | practice session on the sidebar (kept until reset) |
 | `/ctt stats` | your displacement success rate and knockback results |
 | `/ctt reset` | reset your results |
 | `/ctt clear` | remove all dummies |

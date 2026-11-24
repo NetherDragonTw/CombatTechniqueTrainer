@@ -84,7 +84,14 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         getServer().getPluginManager().registerEvents(this, this);
         getDataFolder().mkdirs();
         for (Player p : getServer().getOnlinePlayers()) listen(p);
+        sessions = new Sessions(getDataFolder());
+        for (Player p : getServer().getOnlinePlayers()) sessions.join(p);
+        getServer().getScheduler().scheduleSyncRepeatingTask(this, new Runnable() {
+            @Override public void run() { for (Player p : getServer().getOnlinePlayers()) sessions.update(p); }
+        }, 20L, 20L);
     }
+
+    private Sessions sessions;
 
     @Override
     public void onDisable() {
@@ -92,6 +99,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         for (UUID id : new ArrayList<UUID>(sparring.keySet())) stopSparring(id, false);
         for (UUID id : new ArrayList<UUID>(npcs.keySet())) removeNpc(id);
         for (Player p : getServer().getOnlinePlayers()) unlisten(p);
+        if (sessions != null) sessions.close();
     }
 
     @Override
@@ -154,6 +162,25 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             else p.sendMessage(ChatColor.YELLOW + "Knockback: " + (int) k[0] + " hits taken, jump reset on " + (int) k[1] + " ("
                     + Math.round(100 * k[1] / k[0]) + "%), average push " + fmt2(k[2] / k[0]) + " blocks; without a jump reset "
                     + (k[0] - k[1] > 0 ? fmt2(k[3] / (k[0] - k[1])) : "-") + ", with " + (k[1] > 0 ? fmt2(k[4] / k[1]) : "-") + ".");
+        } else if (sub.equals("session")) {
+            String op = args.length > 1 ? args[1].toLowerCase() : "";
+            Sessions.Session cur = sessions.get(p.getUniqueId());
+            if (op.equals("on") || op.equals("start")) {
+                sessions.start(p);
+                p.sendMessage(ChatColor.GREEN + "Practice session on" + (cur != null && cur.displaceHits + cur.kbHits > 0 ? " (continuing: /ctt session reset to start over)." : ".")
+                        + ChatColor.GRAY + " It keeps counting across logins until you reset it.");
+            } else if (op.equals("off") || op.equals("stop")) {
+                sessions.stop(p);
+                p.sendMessage(ChatColor.GRAY + "Practice session paused (kept). /ctt session on to continue.");
+            } else if (op.equals("reset")) {
+                sessions.reset(p);
+                p.sendMessage(ChatColor.GRAY + "Practice session reset.");
+            } else {
+                if (cur == null) { p.sendMessage(ChatColor.GRAY + "No session yet: /ctt session on"); return true; }
+                p.sendMessage(ChatColor.YELLOW + "Session " + (cur.on ? "on" : "paused") + ", " + Sessions.duration(Sessions.timeMs(cur))
+                        + ": displaced " + cur.displaced + "/" + cur.displaceHits + " (" + Sessions.pct(cur.displaced, cur.displaceHits) + "), jump resets "
+                        + cur.jumpResets + "/" + cur.kbHits + " (" + Sessions.pct(cur.jumpResets, cur.kbHits) + ")");
+            }
         } else if (sub.equals("reset")) {
             stats.remove(p.getUniqueId());
             kbStats.remove(p.getUniqueId());
@@ -167,6 +194,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme [interval_ms] [level]" + ChatColor.GRAY + " - a dummy that hits you (default every 1000 ms, extra knockback 1 like a sprint hit)");
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme stop" + ChatColor.GRAY + " - stop it");
             p.sendMessage(ChatColor.YELLOW + "/ctt clear" + ChatColor.GRAY + " - remove all dummies");
+            p.sendMessage(ChatColor.YELLOW + "/ctt session on|off|reset" + ChatColor.GRAY + " - a practice session on the sidebar: hits, success rates, time (kept until you reset it)");
             p.sendMessage(ChatColor.YELLOW + "/ctt stats" + ChatColor.GRAY + " / " + ChatColor.YELLOW + "/ctt reset" + ChatColor.GRAY + " - your results");
             p.sendMessage(ChatColor.GRAY + "Displacement: sprint or use a Knockback item, it only turns the extra knockback.");
         }
@@ -309,6 +337,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         removeNpc(e.getPlayer().getUniqueId());
+        sessions.quit(e.getPlayer());
         unlisten(e.getPlayer());
         looks.remove(e.getPlayer().getUniqueId());
         partners.remove(e.getPlayer().getUniqueId());
@@ -374,6 +403,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             if (s == null) { s = new int[2]; stats.put(p.getUniqueId(), s); }
             s[0]++;
             if (ok) s[1]++;
+            sessions.addDisplace(p.getUniqueId(), ok);
         }
         String extra = level == 0 ? ChatColor.RED + "no extra knockback (not sprinting, no Knockback item)"
                 : ChatColor.GRAY + "extra kb " + level + (sprinting ? " (sprint" + (kbLevel > 0 ? " + Knockback " + kbLevel : "") + ")" : " (Knockback " + kbLevel + ")");
@@ -564,6 +594,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     public void onJoin(PlayerJoinEvent e) {
         final Player p = e.getPlayer();
         listen(p);
+        sessions.join(p);
         getServer().getScheduler().runTaskLater(this, new Runnable() {
             @Override public void run() { for (PlayerNpc n : npcs.values()) if (p.isOnline() && n.world == p.getWorld()) n.show(p); }
         }, 10L);
@@ -846,6 +877,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         if (k == null) { k = new double[5]; kbStats.put(h.p.getUniqueId(), k); }
         k[0]++; k[2] += push;
         if (reset) { k[1]++; k[4] += push; } else k[3] += push;
+        sessions.addKnockback(h.p.getUniqueId(), reset, push);
 
         h.p.sendMessage((h.source.equals("dummy") ? "" : ChatColor.DARK_GRAY + "[" + h.source + "] ") + jump);
         h.p.sendMessage("  " + ChatColor.WHITE + "pushed " + fmt2(push) + " blocks" + ChatColor.GRAY + " (" + fmt2(side) + " sideways) over "
