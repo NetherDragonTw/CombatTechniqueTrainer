@@ -125,6 +125,19 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         } else if (sub.equals("partner")) {
             partner(p, args);
         } else if (sub.equals("npc")) {
+            if (args.length > 1 && args[1].equalsIgnoreCase("setback")) {
+                Integer t = args.length > 2 ? parseTicks(args[2]) : null;
+                if (t == null) {
+                    p.sendMessage(ChatColor.RED + "/ctt npc setback <time>" + ChatColor.GRAY + " - e.g. 30t (ticks) or 1.5s (seconds), 5t-200t; now "
+                            + npcSetback(p.getUniqueId()) + "t (" + fmt2(npcSetback(p.getUniqueId()) / 20.0) + "s)");
+                    return true;
+                }
+                npcSetbacks.put(p.getUniqueId(), t);
+                PlayerNpc cur = npcs.get(p.getUniqueId());
+                if (cur != null) cur.setbackTicks = t;
+                p.sendMessage(ChatColor.GREEN + "Player dummy goes back to its spot " + t + " ticks (" + fmt2(t / 20.0) + " s) after each hit.");
+                return true;
+            }
             if (args.length > 1 && (args[1].equalsIgnoreCase("off") || args[1].equalsIgnoreCase("remove"))) {
                 p.sendMessage(ChatColor.GRAY + (removeNpc(p.getUniqueId()) ? "Player dummy removed." : "You have no player dummy."));
                 return true;
@@ -191,6 +204,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             p.sendMessage(ChatColor.YELLOW + "/ctt partner add|remove <player>" + ChatColor.GRAY + " / " + ChatColor.YELLOW + "list" + ChatColor.GRAY + " - measure your hits on a friend too");
             p.sendMessage(ChatColor.YELLOW + "/ctt stick [level]" + ChatColor.GRAY + " - a Knockback stick (default Knockback I, given with /ctt target)");
             p.sendMessage(ChatColor.YELLOW + "/ctt npc [interval_ms] [level] [distance]" + ChatColor.GRAY + " - a player dummy: hit it (displacement) and it hits you back with a swing (knockback); interval 0 = it never hits; /ctt npc off");
+            p.sendMessage(ChatColor.YELLOW + "/ctt npc setback <30t|1.5s>" + ChatColor.GRAY + " - how long after a hit it is put back on its spot (default 30 ticks)");
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme [interval_ms] [level]" + ChatColor.GRAY + " - a dummy that hits you (default every 1000 ms, extra knockback 1 like a sprint hit)");
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme stop" + ChatColor.GRAY + " - stop it");
             p.sendMessage(ChatColor.YELLOW + "/ctt clear" + ChatColor.GRAY + " - remove all dummies");
@@ -472,6 +486,24 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     private static final long HURT_COOLDOWN_MS = 500; // vanilla: a second hit within 10 ticks gives no knockback
     private static final String LISTENER = "ctt_npc";
     private int tick;
+    private final Map<UUID, Integer> npcSetbacks = new HashMap<UUID, Integer>(); // owner -> setback ticks, kept for the next dummy
+
+    private int npcSetback(UUID owner) { Integer t = npcSetbacks.get(owner); return t == null ? RETURN_TICKS : t; }
+
+    /** "30t" / "30" = ticks, "1.5s" = seconds; 5-200 ticks, or null. */
+    static Integer parseTicks(String v) {
+        String x = v.trim().toLowerCase(java.util.Locale.ROOT);
+        double ticks;
+        try {
+            if (x.endsWith("s")) ticks = Double.parseDouble(x.substring(0, x.length() - 1)) * 20;
+            else if (x.endsWith("t")) ticks = Double.parseDouble(x.substring(0, x.length() - 1));
+            else ticks = Double.parseDouble(x);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (Double.isNaN(ticks)) return null;
+        return (int) Math.max(5, Math.min(200, Math.round(ticks)));
+    }
 
     private void spawnNpc(Player p, long interval, int level, double distance) {
         removeNpc(p.getUniqueId());
@@ -485,6 +517,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         PlayerNpc n;
         try {
             n = new PlayerNpc(p.getUniqueId(), at, npcName(), interval, level);
+            n.setbackTicks = npcSetback(p.getUniqueId());
         } catch (Throwable t) {
             p.sendMessage(ChatColor.RED + "Cannot create a player dummy on this server (" + t.getClass().getSimpleName() + ": " + t.getMessage() + "). It needs Spigot / Paper 1.8.8.");
             getLogger().warning("Player dummy failed: " + t);
@@ -578,7 +611,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         n.knock(pl.getX(), pl.getZ(), yaw, level);
         n.hurtFlash();
         n.world.playSound(from, Sound.HURT_FLESH, 1f, 1f);
-        n.returnTick = tick + RETURN_TICKS;
+        n.returnTick = tick + n.setbackTicks;
         final Player fp = p;
         final PlayerNpc fn = n;
         final double fb = bearing, fo = offset;

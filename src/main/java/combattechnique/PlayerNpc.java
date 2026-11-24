@@ -28,6 +28,7 @@ final class PlayerNpc {
     boolean onGround = true, moving;
     long lastHurt, nextHit;
     int returnTick = -1;
+    int setbackTicks = 30; // put back on its spot this many ticks after a hit
 
     PlayerNpc(UUID owner, Location at, String name, long intervalMs, int level) throws Exception {
         this.owner = owner;
