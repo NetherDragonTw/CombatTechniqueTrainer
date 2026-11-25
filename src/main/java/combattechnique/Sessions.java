@@ -30,6 +30,8 @@ final class Sessions {
         long since;               // when the current online stretch started (0 = not counting)
         int displaceHits, displaced;
         int kbHits, jumpResets;
+        int fbThrown, fbReturned;
+        long fbReactSum;
         double pushSum;
     }
 
@@ -101,6 +103,13 @@ final class Sessions {
         if (ok) s.displaced++;
     }
 
+    void addFireball(UUID id, Long reactMs) {
+        Session s = active(id);
+        if (s == null) return;
+        s.fbThrown++;
+        if (reactMs != null) { s.fbReturned++; s.fbReactSum += reactMs; }
+    }
+
     void addKnockback(UUID id, boolean reset, double push) {
         Session s = active(id);
         if (s == null) return;
@@ -156,6 +165,12 @@ final class Sessions {
         want.add(ChatColor.GRAY + " Jump resets " + ChatColor.WHITE + s.jumpResets);
         want.add(ChatColor.GRAY + " Rate " + ChatColor.GREEN + pct(s.jumpResets, s.kbHits) + ChatColor.RESET);
         want.add(ChatColor.GRAY + " Avg push " + ChatColor.WHITE + (s.kbHits == 0 ? "-" : String.format(Locale.ROOT, "%.2f", s.pushSum / s.kbHits)));
+        if (s.fbThrown > 0) {
+            want.add(ChatColor.RESET + "   ");
+            want.add(ChatColor.GOLD + "Fireballs");
+            want.add(ChatColor.GRAY + " Returned " + ChatColor.WHITE + s.fbReturned + "/" + s.fbThrown);
+            want.add(ChatColor.GRAY + " Avg reaction " + ChatColor.WHITE + (s.fbReturned == 0 ? "-" : (s.fbReactSum / s.fbReturned) + " ms"));
+        }
         List<String> have = lines.get(p.getUniqueId());
         for (String old : have) if (!want.contains(old)) b.resetScores(old);
         for (int i = 0; i < want.size(); i++) {
@@ -182,6 +197,9 @@ final class Sessions {
                 s.kbHits = c.getInt("kbHits");
                 s.jumpResets = c.getInt("jumpResets");
                 s.pushSum = c.getDouble("pushSum");
+                s.fbThrown = c.getInt("fbThrown");
+                s.fbReturned = c.getInt("fbReturned");
+                s.fbReactSum = c.getLong("fbReactSum");
                 sessions.put(UUID.fromString(k), s);
             } catch (IllegalArgumentException ignored) {
             }
@@ -200,6 +218,9 @@ final class Sessions {
             y.set(k + ".kbHits", s.kbHits);
             y.set(k + ".jumpResets", s.jumpResets);
             y.set(k + ".pushSum", s.pushSum);
+            y.set(k + ".fbThrown", s.fbThrown);
+            y.set(k + ".fbReturned", s.fbReturned);
+            y.set(k + ".fbReactSum", s.fbReactSum);
         }
         try { y.save(file); } catch (IOException ignored) {}
     }

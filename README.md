@@ -56,6 +56,13 @@ hit you get:
 
 `/ctt hitme stop` removes it. You take no real damage. Survival or adventure mode only (creative takes no knockback).
 
+### Returning fireballs — `/ctt fireball [interval_ms] [distance]`
+Throws a fireball at you every `interval_ms` (default 4000; 1000-20000) from a spot `distance` blocks in front of
+where you face when you start it (default 12), or from your player dummy if you have one (it swings as it throws). Hit
+the fireball back: each one is timed from its throw ("Returned in 412 ms"), and one that reaches you counts as not
+returned. The fireballs do not break blocks or set fires, and you are healed after a hit. `/ctt fireball off` stops it.
+Logged to `fireballs.csv`; the session sidebar shows returned / thrown and the average reaction.
+
 ### Practice sessions — `/ctt session on`
 Turns on a sidebar with your practice time, displacement hits / displaced / success rate, and knockback taken / jump
 resets / rate / average push. It keeps counting across logins and server restarts until you run `/ctt session reset`
@@ -70,6 +77,7 @@ session is on and you are online. Stored in `plugins/CombatTechniqueTrainer/sess
 | `/ctt target [distance]` | displacement dummy (1.5–6 blocks, default 3) and a Knockback I stick |
 | `/ctt target move [speed] [width] [distance]` | a dummy walking side to side (0.5–6 blocks/s, 1–10 blocks wide) |
 | `/ctt partner add\|remove <player>`, `/ctt partner list` | measure hits both ways with a friend |
+| `/ctt fireball [interval_ms] [distance]`, `/ctt fireball off` | fireballs thrown at you to hit back, timed |
 | `/ctt stick [level]` | a Knockback stick (1–5, default 1) |
 | `/ctt hitme [interval_ms] [level]` | sparring dummy that hits you (250–5000 ms, level 0–5) |
 | `/ctt hitme stop` | remove your sparring dummy |

@@ -12,6 +12,10 @@ import org.bukkit.entity.EntityType;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Villager;
+import org.bukkit.entity.Fireball;
+import org.bukkit.entity.LargeFireball;
+import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.entity.ProjectileHitEvent;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -124,6 +128,11 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             }
         } else if (sub.equals("partner")) {
             partner(p, args);
+        } else if (sub.equals("fireball")) {
+            if (args.length > 1 && (args[1].equalsIgnoreCase("off") || args[1].equalsIgnoreCase("stop"))) { stopFireballs(p, true); return true; }
+            long interval = args.length > 1 ? (long) clamp(args[1], 1000, 20000, 4000) : 4000;
+            double distance = args.length > 2 ? clamp(args[2], 4, 30, 12) : 12;
+            startFireballs(p, interval, distance);
         } else if (sub.equals("npc")) {
             if (args.length > 1 && args[1].equalsIgnoreCase("setback")) {
                 Integer t = args.length > 2 ? parseTicks(args[2]) : null;
@@ -205,6 +214,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
             p.sendMessage(ChatColor.YELLOW + "/ctt stick [level]" + ChatColor.GRAY + " - a Knockback stick (default Knockback I, given with /ctt target)");
             p.sendMessage(ChatColor.YELLOW + "/ctt npc [interval_ms] [level] [distance]" + ChatColor.GRAY + " - a player dummy: hit it (displacement) and it hits you back with a swing (knockback); interval 0 = it never hits; /ctt npc off");
             p.sendMessage(ChatColor.YELLOW + "/ctt npc setback <30t|1.5s>" + ChatColor.GRAY + " - how long after a hit it is put back on its spot (default 30 ticks)");
+            p.sendMessage(ChatColor.YELLOW + "/ctt fireball [interval_ms] [distance]" + ChatColor.GRAY + " - fireballs thrown at you to hit back (default every 4000 ms from 12 blocks; from your player dummy if you have one); /ctt fireball off");
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme [interval_ms] [level]" + ChatColor.GRAY + " - a dummy that hits you (default every 1000 ms, extra knockback 1 like a sprint hit)");
             p.sendMessage(ChatColor.YELLOW + "/ctt hitme stop" + ChatColor.GRAY + " - stop it");
             p.sendMessage(ChatColor.YELLOW + "/ctt clear" + ChatColor.GRAY + " - remove all dummies");
@@ -351,6 +361,7 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         removeNpc(e.getPlayer().getUniqueId());
+        stopFireballs(e.getPlayer(), false);
         sessions.quit(e.getPlayer());
         unlisten(e.getPlayer());
         looks.remove(e.getPlayer().getUniqueId());
@@ -486,6 +497,110 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     private static final long HURT_COOLDOWN_MS = 500; // vanilla: a second hit within 10 ticks gives no knockback
     private static final String LISTENER = "ctt_npc";
     private int tick;
+
+    // ---- Fireball practice: fireballs thrown at you to hit back ------------------------------------------------------
+
+    private final Map<UUID, Integer> fireballTasks = new HashMap<UUID, Integer>();  // player -> repeating task
+    private final Map<UUID, Object[]> shots = new HashMap<UUID, Object[]>();        // fireball -> {player uuid, launch ms, from}
+
+    private void startFireballs(final Player p, long intervalMs, final double distance) {
+        stopFireballs(p, false);
+        final UUID id = p.getUniqueId();
+        long ticks = Math.max(20, Math.round(intervalMs / 50.0));
+        int task = getServer().getScheduler().scheduleSyncRepeatingTask(this, new Runnable() {
+            @Override public void run() {
+                Player q = getServer().getPlayer(id);
+                if (q == null) { stopFireballs(null, false); return; }
+                launch(q, distance);
+            }
+        }, 40L, ticks);
+        fireballTasks.put(id, task);
+        p.sendMessage(ChatColor.GREEN + "Fireballs every " + ticks * 50 + " ms" + (npcs.containsKey(id) ? " from your player dummy." : " from " + fmt1(distance) + " blocks in front of where you face now.")
+                + " Hit them back; each one is timed from its throw. /ctt fireball off to stop.");
+        Location eye = p.getEyeLocation();
+        Vector dir = eye.getDirection().setY(0);
+        if (dir.lengthSquared() < 1e-6) dir = new Vector(0, 0, 1);
+        fireFrom.put(id, eye.clone().add(dir.normalize().multiply(distance)).add(0, 1, 0));
+    }
+
+    private final Map<UUID, Location> fireFrom = new HashMap<UUID, Location>();
+
+    private void stopFireballs(Player p, boolean tell) {
+        if (p == null) {
+            for (Iterator<Map.Entry<UUID, Integer>> it = fireballTasks.entrySet().iterator(); it.hasNext(); ) {
+                Map.Entry<UUID, Integer> e = it.next();
+                if (getServer().getPlayer(e.getKey()) == null) { getServer().getScheduler().cancelTask(e.getValue()); it.remove(); fireFrom.remove(e.getKey()); }
+            }
+            return;
+        }
+        Integer t = fireballTasks.remove(p.getUniqueId());
+        fireFrom.remove(p.getUniqueId());
+        if (t != null) getServer().getScheduler().cancelTask(t);
+        if (tell) p.sendMessage(ChatColor.GRAY + (t != null ? "Fireballs stopped." : "No fireballs running."));
+    }
+
+    private void launch(Player p, double distance) {
+        if (p.isDead() || p.getGameMode() == GameMode.SPECTATOR) return;
+        PlayerNpc n = npcs.get(p.getUniqueId());
+        Location from;
+        if (n != null && n.world == p.getWorld()) { from = n.location().add(0, 1.62, 0); n.swingArm(); }
+        else from = fireFrom.get(p.getUniqueId());
+        if (from == null || from.getWorld() != p.getWorld()) return;
+        Vector dir = p.getEyeLocation().toVector().subtract(from.toVector());
+        if (dir.lengthSquared() < 4) return;
+        dir.normalize();
+        Location at = from.clone().add(dir.clone().multiply(1.0));
+        at.setDirection(dir);
+        LargeFireball f = (LargeFireball) p.getWorld().spawn(at, LargeFireball.class);
+        f.setDirection(dir);
+        f.setVelocity(dir.clone().multiply(0.6));
+        f.setYield(0f);          // no explosion damage to blocks or players
+        f.setIsIncendiary(false);
+        shots.put(f.getUniqueId(), new Object[]{p.getUniqueId(), System.currentTimeMillis(), from.clone()});
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onFireballHit(EntityDamageByEntityEvent e) {
+        if (!(e.getEntity() instanceof Fireball) || !(e.getDamager() instanceof Player)) return;
+        Object[] s = shots.remove(e.getEntity().getUniqueId());
+        if (s == null) return;
+        Player p = (Player) e.getDamager();
+        long react = System.currentTimeMillis() - (Long) s[1];
+        double dist = e.getEntity().getLocation().distance(p.getEyeLocation());
+        p.sendMessage(ChatColor.GREEN + "Returned " + ChatColor.WHITE + "in " + react + " ms" + ChatColor.GRAY + " (fireball " + fmt1(dist) + " blocks from your eyes)");
+        if (p.getUniqueId().equals(s[0])) sessions.addFireball(p.getUniqueId(), react);
+        logFireball(p, react, dist, true);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onFireballLand(ProjectileHitEvent e) {
+        Object[] s = shots.remove(e.getEntity().getUniqueId());
+        if (s == null) return;
+        Player p = getServer().getPlayer((UUID) s[0]);
+        if (p == null) return;
+        p.sendMessage(ChatColor.RED + "Not returned" + ChatColor.GRAY + " (it hit after " + (System.currentTimeMillis() - (Long) s[1]) + " ms)");
+        sessions.addFireball(p.getUniqueId(), null);
+        logFireball(p, null, null, false);
+        final UUID id = p.getUniqueId();
+        getServer().getScheduler().runTaskLater(this, new Runnable() {
+            @Override public void run() { Player q = getServer().getPlayer(id); if (q != null && !q.isDead()) q.setHealth(q.getMaxHealth()); }
+        }, 2L);
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onFireballExplode(EntityExplodeEvent e) {
+        if (shots.containsKey(e.getEntity().getUniqueId()) || e.getEntity() instanceof Fireball && e.getEntity().hasMetadata("ctt")) e.blockList().clear();
+    }
+
+    private void logFireball(Player p, Long react, Double dist, boolean returned) {
+        File f = new File(getDataFolder(), "fireballs.csv");
+        boolean header = !f.exists();
+        try (FileWriter w = new FileWriter(f, true)) {
+            if (header) w.write("time,player,returned,reactionMs,distanceBlocks\n");
+            w.write(System.currentTimeMillis() + "," + p.getName() + "," + returned + "," + (react == null ? "" : react) + "," + (dist == null ? "" : fmt2(dist)) + "\n");
+        } catch (IOException ignored) {
+        }
+    }
     private final Map<UUID, Integer> npcSetbacks = new HashMap<UUID, Integer>(); // owner -> setback ticks, kept for the next dummy
 
     private int npcSetback(UUID owner) { Integer t = npcSetbacks.get(owner); return t == null ? RETURN_TICKS : t; }
