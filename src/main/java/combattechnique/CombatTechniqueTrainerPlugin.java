@@ -31,7 +31,6 @@ import org.bukkit.Sound;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
-import org.bukkit.event.player.PlayerVelocityEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -77,7 +76,6 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
     private final java.util.concurrent.ConcurrentHashMap<Integer, PlayerNpc> npcById = new java.util.concurrent.ConcurrentHashMap<Integer, PlayerNpc>();
     private int npcTask = -1;
     private final Map<UUID, Hit> partnerHits = new HashMap<UUID, Hit>();          // player -> knockback from a partner being followed
-    private final Map<UUID, Object[]> partnerHitAt = new HashMap<UUID, Object[]>(); // player -> {ms, partner name, level, start, onGround}
     private final Map<UUID, Deque<long[]>> looks = new HashMap<UUID, Deque<long[]>>(); // player -> (ms, yaw * 1000)
     private final Map<UUID, int[]> stats = new HashMap<UUID, int[]>();             // player -> {hits with extra kb, displaced}
     private final Map<UUID, Sparring> sparring = new HashMap<UUID, Sparring>();    // player -> the dummy hitting them
@@ -367,7 +365,6 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         looks.remove(e.getPlayer().getUniqueId());
         partners.remove(e.getPlayer().getUniqueId());
         partnerHits.remove(e.getPlayer().getUniqueId());
-        partnerHitAt.remove(e.getPlayer().getUniqueId());
         stopSparring(e.getPlayer().getUniqueId(), false);
     }
 
@@ -830,27 +827,12 @@ public final class CombatTechniqueTrainerPlugin extends JavaPlugin implements Li
         ItemStack held = a.getItemInHand();
         int level = (held == null ? 0 : held.getEnchantmentLevel(Enchantment.KNOCKBACK)) + (a.isSprinting() ? 1 : 0);
         @SuppressWarnings("deprecation") boolean onGround = v.isOnGround();
-        partnerHitAt.put(v.getUniqueId(), new Object[]{System.currentTimeMillis(), a.getName(), level, v.getLocation().clone(), onGround});
-        final UUID id = v.getUniqueId();
-        // The knockback goes out with the server's entity tracker later in this tick (PlayerVelocityEvent); if no
-        // event came, use the velocity the server set.
-        getServer().getScheduler().runTaskLater(this, new Runnable() {
-            @Override public void run() {
-                Player q = getServer().getPlayer(id);
-                if (q != null && partnerHitAt.containsKey(id)) startPartnerHit(q, q.getVelocity());
-            }
-        }, 1L);
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onVelocity(PlayerVelocityEvent e) {
-        if (partnerHitAt.containsKey(e.getPlayer().getUniqueId())) startPartnerHit(e.getPlayer(), e.getVelocity());
-    }
-
-    private void startPartnerHit(Player v, Vector vel) {
-        Object[] h = partnerHitAt.remove(v.getUniqueId());
-        if (h == null || System.currentTimeMillis() - (Long) h[0] > 200) return;
-        Hit hit = new Hit(v, (Long) h[0], (Integer) h[2], new double[]{vel.getX(), vel.getY(), vel.getZ()}, (Location) h[3], (Boolean) h[4], ping(v), (String) h[1]);
+        // The knockback the server is about to apply (vanilla 1.8, computed from the hit: this MONITOR event runs before
+        // the server adds it). PlayerVelocityEvent can report a stale velocity here (0.7.1: a standing player's -0.078).
+        Location al = a.getLocation(), vl = v.getLocation();
+        Vector pre = v.getVelocity();
+        double[] kb = Knockback.hitVelocity(new double[]{pre.getX(), pre.getY(), pre.getZ()}, vl.getX() - al.getX(), vl.getZ() - al.getZ(), al.getYaw(), level);
+        Hit hit = new Hit(v, System.currentTimeMillis(), level, kb, vl.clone(), onGround, ping(v), a.getName());
         partnerHits.put(v.getUniqueId(), hit);
         final UUID id = v.getUniqueId();
         final Hit fh = hit;
